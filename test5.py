@@ -1,3 +1,5 @@
+#uses python version 3.11.9
+#uses faster whisper model and spacy (en_core_web_sm) for speech-to-text and clause splitting
 import time
 import en_core_web_sm
 from faster_whisper import WhisperModel
@@ -13,6 +15,7 @@ from tqdm import tqdm
 from pathlib import Path
 from difflib import SequenceMatcher
 
+#turns panopto formatted timestamps into seconds
 def timestamp_to_seconds(t):
     parts = t.strip().split(':')
     if len(parts) == 3:
@@ -24,18 +27,19 @@ def timestamp_to_seconds(t):
         raise ValueError(f"Invalid timestamp: {t}")
     return int(h) * 3600 + int(m) * 60 + float(s)
 
+#checks for certain conditions if a segment crosses a cut in Panopto
 def cross_cut(start, end, cut_ranges):
     for cut_start, cut_end in cut_ranges:
-        if end < cut_start:
+        if end < cut_start: #stop looping if segment is definitely not crossed by a cut
             return "none"
-        if start > cut_start and end < cut_end:
+        if start > cut_start and end < cut_end: #a segment is within a cut range
             return "in"
-        if start > cut_start and start < cut_end:
-            return cut_end + 0.1
-        if start < cut_start and end > cut_end:
+        if start > cut_start and start < cut_end: #a segment starts in a cut range
+            return cut_end + 0.1 #return the end of the cut+0.1 so the segment starts after the cut
+        if start < cut_start and end > cut_end: #if the cut is within the segment
             return "crosses"
     return "none"
-
+#checks if a segment crosses a cut period in Panopto
 def crosses_cut(start, end, cut_ranges):
     for cut_start, cut_end in cut_ranges:
         if end < cut_start:
@@ -44,38 +48,45 @@ def crosses_cut(start, end, cut_ranges):
             return True
     return False
 
+#formats seconds into srt format
 def format_srt_time(seconds):
     return f"{int(seconds // 3600):02}:{int((seconds % 3600) // 60):02}:{int(seconds % 60):02},{int((seconds * 1000) % 1000):03}"
 
+#method for splitting segments larger than 12 words based on where the biggest pauses are
 def split_segments(words, short_seg):
     gaps = []
-            #we need to check if the length is too short (if longest gap takes place at first word)
+    #checks the middle 20% of the segment
     for i in range(round(len(words)*.4), round(len(words)*.6)):
-                gap = words[i]['start'] - words[i-1]['end']
-                gaps.append((gap, i))  # store the gap and index to split at
-            # Find the largest gap
+        gap = words[i]['start'] - words[i-1]['end']
+        gaps.append((gap, i))  # store the gap and index to split at
+
+    # Finds the largest gap
     max_gap, split_index = max(gaps, key=lambda x: x[0])
-            # First sub-segment
+    # First sub-segment
     first_words = words[:split_index]
-    if len(first_words) <= 12:
-            short_seg.append({
-                        "start": first_words[0]["start"],
-                        "end": first_words[-1]["end"],
-                        "text": ''.join([w["word"] for w in first_words]).strip()
-                    })
-    else:
+    if len(first_words) <= 12: #add the segment to the final list
+        short_seg.append({
+            "start": first_words[0]["start"],
+            "end": first_words[-1]["end"],
+            "text": ''.join([w["word"] for w in first_words]).strip()
+        })
+    else: #recurse
         split_segments(first_words, short_seg)
-            # Second sub-segment
+
+    # Second sub-segment (same logic as first)
     second_words = words[split_index:]
     if len(second_words) <= 12:
-            short_seg.append({
-                        "start": second_words[0]["start"],
-                        "end": second_words[-1]["end"],
-                        "text": ''.join([w["word"] for w in second_words]).strip()
-                    })
+        short_seg.append({
+            "start": second_words[0]["start"],
+            "end": second_words[-1]["end"],
+            "text": ''.join([w["word"] for w in second_words]).strip()
+        })
     else:
         split_segments(second_words, short_seg)
 
+#using selenium to grab the Panopto video cuts from the editor via webscraping
+#(not reliable, most likely to cause errors if Panopto editor changes anything)
+#(only works on Chrome browsers)
 def gather_cuts(u):
     # Set up Chrome options
     options = Options()
@@ -102,24 +113,19 @@ def gather_cuts(u):
         print("Could not find the editCutTabPane container.")
         driver.quit()
         exit()
-
+    
+    #cut time texts
     event_time_texts = []
     event_items = wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, "index-event")))
 
     for i, event in enumerate(event_items):
         try:
-            # # Refresh elements to avoid stale references
-            # event_items = driver.find_elements(By.CLASS_NAME, "index-event")
-            # event = event_items[i]
-
-            # Scroll to the event
+            # Hover over the event
             ActionChains(driver).move_to_element(event).perform()
-            # time.sleep(0.3)
 
-            # Find the toggle INSIDE the event
+            # Find the menu toggle INSIDE the event
             toggle = event.find_element(By.CLASS_NAME, "event-edit-toggle")
-            toggle.click()  # safer than .click()
-            # time.sleep(0.5)
+            toggle.click()
 
             # Find the *visible* edit button
             edit_buttons = driver.find_elements(By.CLASS_NAME, "menu-edit-button")
@@ -134,8 +140,7 @@ def gather_cuts(u):
             event_time_texts.append((timestamp_to_seconds(start_time), timestamp_to_seconds(end_time)))
             print(f"Event {i+1}: Start = {start_time}, End = {end_time}")
 
-            # Optional: Close modal/menu if needed
-            # This depends on Panopto’s UI — adjust accordingly
+            # Close the modal window
             try:
                 close_button = driver.find_element(By.ID, "closeLink")
                 close_button.click()
@@ -159,9 +164,9 @@ def gather_cuts(u):
     print(event_time_texts)
 
     driver.quit()
-    # cut_ranges = [(timestamp_to_seconds(r1), timestamp_to_seconds(r2)) for r1, r2 in event_time_texts]
     return event_time_texts
 
+#main trascription actions
 def transcribe_whisper(input_file, cut_ranges):
     model = WhisperModel("tiny", compute_type="int8")
     w_segments, _ = model.transcribe(
@@ -169,11 +174,12 @@ def transcribe_whisper(input_file, cut_ranges):
         language="en",
         word_timestamps=True
     )
-
+    #take the segments generated by whisper and extract all words
     all_words = []
     for segment in w_segments:
         all_words.extend(segment.words)
 
+    #join the words as a string
     full_text = ''.join([w.word for w in all_words])
     # Load spaCy model
     nlp = en_core_web_sm.load()
@@ -183,7 +189,7 @@ def transcribe_whisper(input_file, cut_ranges):
     clause = []
     for token in doc:
         if token.dep_ == 'cc' and token.head.dep_ != 'compound':
-        # If it's a coordinating conjunction (e.g., "and", "but") — push to next clause
+        # If it's a coordinating conjunction (e.g., "and", "but") split and add to clauses
             if clause:
                 clauses.append(' '.join(clause).strip())
             clause = [token.text]  # start next clause with the conjunction
@@ -194,18 +200,21 @@ def transcribe_whisper(input_file, cut_ranges):
             clause = []
         else:
             clause.append(token.text)
-
+    #if words remaining
     if clause:
         clauses.append(' '.join(clause).strip())
 
-    # Match clauses back to word spans
+    # Match clauses back to word timestamps generated by whisper
     segments = []
     word_idx = 0
     for clause_text in clauses:
         clause_words = []
         cleaned_clause = clause_text.replace('“', '"').replace('”', '"').strip()
         match_text = ''
+        #while not at the end of all the words and not at the end of clause
+        #comparing text without spaces
         while word_idx < len(all_words) and len(match_text.replace(' ', '')) < len(cleaned_clause.replace(' ', '')):
+            #get matching Word object
             w = all_words[word_idx]
             clause_words.append({
                 'start': w.start,
@@ -214,6 +223,7 @@ def transcribe_whisper(input_file, cut_ranges):
             })
             match_text += w.word + ' '
             word_idx += 1
+        #add each clause as a segment dictionary with the clause_words dicts in "words"
         if clause_words:
             segments.append({
                 'text': ' '.join(w['word'] for w in clause_words),
@@ -222,33 +232,40 @@ def transcribe_whisper(input_file, cut_ranges):
                 'words': clause_words
             })
 
+    #final set of segments
     short_segments = []
 
-    # Split each original segment into smaller ones
+    # Split each original clause segment into smaller ones or gather into larger ones
     for segment in tqdm(segments, desc="Processing Whisper segments"):
         words = segment.get("words", [])
         if not words:
             continue
+        #check if segment crosses a cut and go through each word if they cross
         if crosses_cut(words[0]["start"], words[-1]["end"], cut_ranges):
             current_words = []
             current_start = words[0]["start"]
-            # current_length = 0
             for word in words:
+                #check for which words cross a cut
                 check_cuts = cross_cut(word["start"], word["end"], cut_ranges)
-                if check_cuts == "in":
+                if check_cuts == "in": #skip/exclude words that are in a cut
                     continue
-                if type(check_cuts) is float:
-                    if current_words:
+                if type(check_cuts) is float: #if word starts in a cut but not in a cut
+                    if current_words: #end the current segment and add it to the final set
                         text = ''.join([w["word"] for w in current_words]).strip()
                         short_segments.append({
                             "start": current_start,
                             "end": current_words[-1]["end"],
                             "text": text
                         })
+                    #start new accumulating segment with the current word and set the start of the segment
+                    #right after the end of the cut (time generated into check_cuts)
                     current_words = [word]
                     current_start = check_cuts
-                    continue
+                    continue #move onto next word
+                #if the start of the current segment and the start of the current word would cross a cut
+                #(but no words are touching the cut)
                 if cross_cut(current_start, word["start"], cut_ranges) == "crosses":
+                    #end the current segment and add it to final set
                     if current_words:
                         text = ''.join([w["word"] for w in current_words]).strip()
                         short_segments.append({
@@ -256,17 +273,21 @@ def transcribe_whisper(input_file, cut_ranges):
                             "end": current_words[-1]["end"],
                             "text": text
                         })
+                    #start the next segment with the current word and its start
                     current_words = [word]
                     current_start = word["start"]
                     continue
+                #adding other words in the current clause that don't cross cuts
                 last_end = word["start"]
                 if not current_words:
                     current_start = word["start"]
                 current_words.append(word)
+                #use last_end to determine the gap between the last end of the current words array and the current word
                 if len(current_words) > 1:
                     last_end = current_words[-2]["end"]
-                duration = word["end"] - current_start
                 d = word["start"] - last_end
+                #check if the gap is greater than 2 seconds or there are more than 9 words in the current segment
+                #if so, end current segment and add it to final set
                 if d >= 2 or len(current_words) >= 10:
                     text = ''.join([w["word"] for w in current_words]).strip()
                     short_segments.append({
@@ -275,30 +296,27 @@ def transcribe_whisper(input_file, cut_ranges):
                         "text": text
                     })
                     current_words = []
-
             # Handle any remaining words in the last segment
             if current_words:
-                # duration = current_words[-1]["end"] - current_start
-                # if duration >= 1.0 or len(current_words) >= 3:
                     text = ' '.join([w["word"] for w in current_words]).strip()
                     short_segments.append({
                         "start": current_start,
                         "end": current_words[-1]["end"],
                         "text": text
                     })
-                # else:
-                #     # Optionally: merge with previous segment if too short
-                #     if short_segments:
-                #         short_segments[-1]["text"] += ' ' + ' '.join([w["word"] for w in current_words])
-                #         short_segments[-1]["end"] = current_words[-1]["end"]
-            continue
+            continue #move onto next clause
+        #if clause doesn't cross a cut and is longer than 12 words
         if len(words) > 12:
+            #split it into smaller segments
             split_segments(words, short_segments)
             continue
+        #if clause doesn't cross a cut and if added to the last segment it would be less than 12
         if short_segments and len(short_segments[-1]["text"].split()) + len(words) < 12 and not crosses_cut(short_segments[-1]["start"], segment["end"], cut_ranges):
+            #add it to the last segment
             short_segments[-1]["text"] += " ".join(w["word"] for w in words)
             short_segments[-1]["end"] = segment["end"]
             continue
+        #else, just add it as a new segment
         short_segments.append(segment)
         short_segments[-1]["text"] = short_segments[-1]["text"].strip()
     # Write to SRT file
@@ -314,11 +332,6 @@ def transcribe_whisper(input_file, cut_ranges):
             f.write(f"{text}\n\n")
 
     print(f"SRT saved to {srt_file}")
-    # txt_file = f"{o_dir}/{input_file}.txt"
-    # with open(txt_file, "w", encoding="utf-8") as f:
-    #     for segment in segments:
-    #         for word in segment.get("words", []):
-    #             f.write(f"{word['word']}, Start: {word['start']}, End: {word['end']}\n")
 
 if __name__ == "__main__":
     while True:
@@ -332,7 +345,7 @@ if __name__ == "__main__":
                 exit(1)
             cuts = gather_cuts(url)
             transcribe_whisper(str(input_file), cuts)
-            pass  # replace with your actual code
+            pass
         except Exception as e:
             print("An error occurred:")
             print(e)
