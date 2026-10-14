@@ -45,6 +45,17 @@ the Panopto API, making the process faster and the application easier to use.
 
 ## Results
 
+Using the new caption generator saved approximately 50% or more of the time
+it would have taken to manually edit the captions around cuts and
+make the segments shorter. The longer the video is and the more frequent the cuts,
+the more time is saved by using this caption generator.  
 
+## Issues
+
+The quality of the captions depend on how fluidly the speaker talks in the video.
+Sometimes, frequent filler words and ungrammatical sentences will result 
+in whisper AI leaving out punctuation and capitalization and just transcribing the words.
+Having to correct the captions when this happens does take longer, but still a little less
+time than having to correct the segment timings and lengths.
 
 
