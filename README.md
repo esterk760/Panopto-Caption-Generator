@@ -1,3 +1,7 @@
+*This repository is more to show the project and its code, not for practical usage and sharing.
+However, if this is helpful for someone, they can try implementing it on their own, though no
+steps for how to do that are shared here.
+
 # Panopto Caption Generator
 
 A Windows Python utility that signs in to Panopto, retrieves a
